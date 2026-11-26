@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "114406333780",
+    "firebase_url": "https://chabbis-26-default-rtdb.firebaseio.com",
+    "project_id": "chabbis-26",
+    "storage_bucket": "chabbis-26.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:114406333780:android:fd50290a71c49bf2fa3cc1",
+        "android_client_info": {
+          "package_name": "com.chabbis.chabbis_26"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAPFa-8AhiYZxZe9g1BktonJbTS2nYbIEk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
