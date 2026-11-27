@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'game_engine.dart';
 import 'room_service.dart';
+
+const String kDatabaseUrl = 'https://chabbis-26-default-rtdb.firebaseio.com';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  FirebaseDatabase.instance.databaseURL = kDatabaseUrl;
   runApp(const Chabbis26App());
 }
 
@@ -43,6 +47,13 @@ class _LobbyScreenState extends State<LobbyScreen> {
   bool _loading = false;
   String? _error;
 
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _codeCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _create() async {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) {
@@ -53,15 +64,27 @@ class _LobbyScreenState extends State<LobbyScreen> {
       _loading = true;
       _error = null;
     });
-    final code = await _roomService.createRoom(name);
-    if (!mounted) return;
-    setState(() => _loading = false);
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => GameTableScreen(roomCode: code, mySeat: 0),
-      ),
-    );
+    try {
+      final code = await _roomService.createRoom(name);
+      if (!mounted) return;
+      setState(() => _loading = false);
+      if (code.isEmpty) {
+        setState(() => _error = 'Could not generate room code. Check Firebase connection.');
+        return;
+      }
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GameTableScreen(roomCode: code, mySeat: 0),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Failed to create room: $e';
+      });
+    }
   }
 
   Future<void> _join() async {
@@ -75,19 +98,27 @@ class _LobbyScreenState extends State<LobbyScreen> {
       _loading = true;
       _error = null;
     });
-    final seat = await _roomService.joinRoom(code, name);
-    if (!mounted) return;
-    setState(() => _loading = false);
-    if (seat == null) {
-      setState(() => _error = 'Room not found or already full (4/4)');
-      return;
+    try {
+      final seat = await _roomService.joinRoom(code, name);
+      if (!mounted) return;
+      setState(() => _loading = false);
+      if (seat == null) {
+        setState(() => _error = 'Room not found or already full (4/4)');
+        return;
+      }
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GameTableScreen(roomCode: code, mySeat: seat),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Failed to join room: $e';
+      });
     }
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => GameTableScreen(roomCode: code, mySeat: seat),
-      ),
-    );
   }
 
   @override
@@ -133,8 +164,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
                       width: double.infinity,
                       child: FilledButton.icon(
                         onPressed: _loading ? null : _create,
-                        icon: const Icon(Icons.add_circle_outline),
-                        label: const Text('Create Room (Get Code)'),
+                        icon: _loading
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.add_circle_outline),
+                        label: Text(_loading ? 'Creating Room...' : 'Create Room (Get Code)'),
                       ),
                     ),
                     const Padding(
@@ -160,7 +197,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
                     ),
                     if (_error != null) ...[
                       const SizedBox(height: 12),
-                      Text(_error!, style: const TextStyle(color: Colors.redAccent)),
+                      Text(
+                        _error!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.redAccent),
+                      ),
                     ],
                   ],
                 ),
@@ -193,13 +234,18 @@ class _GameTableScreenState extends State<GameTableScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<Map<String, dynamic>?>(
+    return StreamBuilder?>(
       stream: _roomService.watchRoom(widget.roomCode),
       builder: (context, snapshot) {
         final room = snapshot.data;
         if (room == null) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
+          return Scaffold(
+            backgroundColor: const Color(0xFF0E331D),
+            appBar: AppBar(
+              backgroundColor: const Color(0xFF092213),
+              title: Text('Room: ${widget.roomCode}'),
+            ),
+            body: const Center(child: CircularProgressIndicator()),
           );
         }
 
@@ -234,7 +280,6 @@ class _GameTableScreenState extends State<GameTableScreen> {
         final canSeeTurap =
             isTurapOpen || (bidderSeat == widget.mySeat && turapSuit != null);
 
-        // Diamond seating relative to current user (bottom = me, right = +1 anti-clockwise, top = partner, left = +3)
         final rightSeat = GameEngine.nextSeat(widget.mySeat);
         final topSeat = GameEngine.nextSeat(rightSeat);
         final leftSeat = GameEngine.nextSeat(topSeat);
@@ -259,7 +304,6 @@ class _GameTableScreenState extends State<GameTableScreen> {
           body: SafeArea(
             child: Column(
               children: [
-                // Top Info Bar
                 Container(
                   width: double.infinity,
                   color: Colors.black26,
@@ -286,11 +330,7 @@ class _GameTableScreenState extends State<GameTableScreen> {
                     ],
                   ),
                 ),
-
-                // Top Player (Teammate)
                 _seatBadge(seats, topSeat, turnSeat, shufflerSeat, 'Partner'),
-
-                // Middle Diamond Row: Left Player | Center Trick | Right Player
                 Expanded(
                   child: Row(
                     children: [
@@ -314,8 +354,6 @@ class _GameTableScreenState extends State<GameTableScreen> {
                     ],
                   ),
                 ),
-
-                // Bottom Player (You) + Hand
                 _seatBadge(seats, widget.mySeat, turnSeat, shufflerSeat, 'You'),
                 const SizedBox(height: 6),
                 SizedBox(
