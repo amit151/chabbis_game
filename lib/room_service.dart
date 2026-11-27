@@ -1,9 +1,62 @@
 import 'dart:math';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'game_engine.dart';
 
+const String kDatabaseUrl = 'https://chabbis-26-default-rtdb.firebaseio.com';
+
+/// Realtime Database returns a List instead of a Map for nodes whose keys are
+/// sequential integers ('0','1','2'). This converts either shape to a Map.
+Map<String, dynamic> _asStringMap(dynamic v) {
+  if (v is Map) {
+    return v.map((k, val) => MapEntry(k.toString(), val));
+  }
+  if (v is List) {
+    final out = <String, dynamic>{};
+    for (var i = 0; i < v.length; i++) {
+      if (v[i] != null) out['$i'] = v[i];
+    }
+    return out;
+  }
+  return <String, dynamic>{};
+}
+
+List<String> _asStringList(dynamic v) {
+  if (v is List) {
+    return v.where((e) => e != null).map((e) => e.toString()).toList();
+  }
+  if (v is Map) {
+    return v.values.map((e) => e.toString()).toList();
+  }
+  return <String>[];
+}
+
+/// Converts raw RTDB data into a predictable, fully typed structure.
+Map<String, dynamic> _normalizeRoom(dynamic raw) {
+  final room = _asStringMap(raw);
+
+  final seatsRaw = _asStringMap(room['seats']);
+  room['seats'] = seatsRaw.map((k, v) {
+    final seat = _asStringMap(v);
+    seat['hand'] = _asStringList(seat['hand']);
+    return MapEntry(k, seat);
+  });
+
+  final trick = _asStringMap(room['trickCards']);
+  room['trickCards'] = trick.map((k, v) => MapEntry(k, v.toString()));
+
+  room['teamScores'] = _asStringMap(room['teamScores']);
+  room['handsWon'] = _asStringMap(room['handsWon']);
+  room['pendingChaalCards'] = _asStringList(room['pendingChaalCards']);
+  room['remainingDeck'] = _asStringList(room['remainingDeck']);
+  return room;
+}
+
 class RoomService {
-  final DatabaseReference _db = FirebaseDatabase.instance.ref('rooms');
+  final DatabaseReference _db = FirebaseDatabase.instanceFor(
+    app: Firebase.app(),
+    databaseURL: kDatabaseUrl,
+  ).ref('rooms');
 
   String _generateCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -43,10 +96,10 @@ class RoomService {
   Future<int?> joinRoom(String rawCode, String playerName) async {
     final code = rawCode.trim().toUpperCase();
     final snap = await _db.child(code).get();
-    if (!snap.exists) return null;
+    if (!snap.exists || snap.value == null) return null;
 
-    final data = Map<String, dynamic>.from(snap.value as Map);
-    final seats = Map<String, dynamic>.from(data['seats'] ?? {});
+    final data = _normalizeRoom(snap.value);
+    final seats = data['seats'] as Map<String, dynamic>;
 
     for (int i = 0; i < 4; i++) {
       if (!seats.containsKey('$i')) {
@@ -68,7 +121,7 @@ class RoomService {
   Stream<Map<String, dynamic>?> watchRoom(String code) {
     return _db.child(code).onValue.map((event) {
       if (!event.snapshot.exists || event.snapshot.value == null) return null;
-      return Map<String, dynamic>.from(event.snapshot.value as Map);
+      return _normalizeRoom(event.snapshot.value);
     });
   }
 
@@ -149,8 +202,8 @@ class RoomService {
     Map<String, dynamic> room,
     int bidderSeat,
   ) async {
-    final rem = List<String>.from(room['remainingDeck'] ?? []);
-    final seats = Map<String, dynamic>.from(room['seats']);
+    final rem = List<String>.from(room['remainingDeck'] as List);
+    final seats = room['seats'] as Map<String, dynamic>;
     final updates = <String, dynamic>{
       'status': 'KHULLI_WINDOW',
       'turnSeat': bidderSeat,
@@ -159,9 +212,9 @@ class RoomService {
           'All 13 cards dealt (4 + 4)! Bidder may lead or anyone may call Khulli Chabbis.',
     };
 
-    // Wave 1 (4 cards each) + Wave 2 (4 cards each)
     for (int i = 0; i < 4; i++) {
-      final existing = List<String>.from(seats['$i']['hand'] ?? []);
+      final seatData = seats['$i'] as Map<String, dynamic>;
+      final existing = List<String>.from(seatData['hand'] as List);
       final wave1 = rem.sublist(i * 4, (i + 1) * 4);
       final wave2 = rem.sublist(16 + i * 4, 16 + (i + 1) * 4);
       updates['seats/$i/hand'] = [...existing, ...wave1, ...wave2];
@@ -206,11 +259,12 @@ class RoomService {
     required int seat,
     required PlayingCard card,
   }) async {
-    final seats = Map<String, dynamic>.from(room['seats']);
-    final hand = List<String>.from(seats['$seat']['hand'] ?? []);
+    final seats = room['seats'] as Map<String, dynamic>;
+    final seatData = seats['$seat'] as Map<String, dynamic>;
+    final hand = List<String>.from(seatData['hand'] as List);
     hand.remove(card.code);
 
-    final trickRaw = Map<String, dynamic>.from(room['trickCards'] ?? {});
+    final trickRaw = Map<String, dynamic>.from(room['trickCards'] as Map);
     trickRaw['$seat'] = card.code;
 
     final leadSuitStr = (room['leadSuit'] as String? ?? '');
@@ -249,13 +303,13 @@ class RoomService {
       isTurapOpen: isTurapOpen,
     );
 
-    final handsWon = Map<String, dynamic>.from(room['handsWon']);
+    final handsWon = Map<String, dynamic>.from(room['handsWon'] as Map);
     final winnerTeam = GameEngine.teamKeyForSeat(trickWinner);
     handsWon[winnerTeam] = (handsWon[winnerTeam] as int) + 1;
 
     final prevStreakSeat = room['streakSeat'] as int? ?? -1;
     final prevStreakCount = room['streakCount'] as int? ?? 0;
-    final pendingChaal = List<String>.from(room['pendingChaalCards'] ?? []);
+    final pendingChaal = List<String>.from(room['pendingChaalCards'] as List);
     pendingChaal.addAll(trickRaw.values.cast<String>());
 
     int newStreakSeat = trickWinner;
@@ -267,7 +321,7 @@ class RoomService {
       chaalMsg =
           'CHAAL WON! Seat ${trickWinner + 1} won 2 consecutive hands (${pendingChaal.length} cards claimed)!';
       pendingChaal.clear();
-      newStreakCount = 0; // Streak resets to 0 after claiming Chaal
+      newStreakCount = 0;
     }
 
     final totalHandsPlayed =
@@ -277,9 +331,10 @@ class RoomService {
     final defenderTeam = bidderTeam == 'team02' ? 'team13' : 'team02';
     final isKhulli = room['isKhulliChabbis'] as bool? ?? false;
 
-    // In Khulli Chabbis, if defenders ever win 2 consecutive hands (claim 1 Chaal), round ends immediately!
-    final khulliDefeatedEarly =
-        isKhulli && (winnerTeam == defenderTeam) && (prevStreakSeat == trickWinner) && (prevStreakCount + 1 == 2);
+    final khulliDefeatedEarly = isKhulli &&
+        (winnerTeam == defenderTeam) &&
+        (prevStreakSeat == trickWinner) &&
+        (prevStreakCount + 1 == 2);
 
     if (totalHandsPlayed >= 13 || khulliDefeatedEarly) {
       await _finishRound(
@@ -298,7 +353,7 @@ class RoomService {
       'seats/$seat/hand': hand,
       'trickCards': <String, String>{},
       'leadSuit': '',
-      'turnSeat': trickWinner, // Winner leads next hand
+      'turnSeat': trickWinner,
       'handsWon': handsWon,
       'streakSeat': newStreakSeat,
       'streakCount': newStreakCount,
@@ -332,13 +387,12 @@ class RoomService {
       khulliChabbisFailedEarly: khulliDefeatedEarly,
     );
 
-    final scores = Map<String, dynamic>.from(room['teamScores']);
+    final scores = Map<String, dynamic>.from(room['teamScores'] as Map);
     scores[bidderTeam] = (scores[bidderTeam] as int) + delta;
     scores[defenderTeam] = (scores[defenderTeam] as int) - delta;
 
     final bidderWonRound = delta > 0;
     final currentShuffler = room['shufflerSeat'] as int;
-    // Shuffler stays if bidding team wins; shifts anti-clockwise if bidding team loses
     final nextShuffler =
         bidderWonRound ? currentShuffler : GameEngine.nextSeat(currentShuffler);
 
