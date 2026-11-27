@@ -68,12 +68,13 @@ class GameEngine {
   /// Anti-clockwise next seat: 0 -> 1 -> 2 -> 3 -> 0
   static int nextSeat(int seat) => (seat + 1) % 4;
 
-  /// Opposite seat is teammate: (0 & 2) = Team A, (1 & 3) = Team B
+  /// Opposite seat is teammate: (0 & 2) = Team A (team02), (1 & 3) = Team B (team13)
   static int teammateSeat(int seat) => (seat + 2) % 4;
 
   static String teamKeyForSeat(int seat) =>
       (seat % 2 == 0) ? 'team02' : 'team13';
 
+  /// Explicit Fisher-Yates shuffle on a standard 52-card deck.
   static List<PlayingCard> createShuffledDeck([Random? rng]) {
     final random = rng ?? Random.secure();
     final deck = <PlayingCard>[];
@@ -82,8 +83,35 @@ class GameEngine {
         deck.add(PlayingCard(suit: suit, rank: r));
       }
     }
-    deck.shuffle(random);
+
+    for (int i = deck.length - 1; i > 0; i--) {
+      final j = random.nextInt(i + 1);
+      final temp = deck[i];
+      deck[i] = deck[j];
+      deck[j] = temp;
+    }
     return deck;
+  }
+
+  /// Distributes all 52 cards (13 per player) across 4 seats in 3 rounds:
+  /// 5 cards each, then 4 cards each, then 4 cards each starting after [shufflerSeat].
+  static Map<int, List<PlayingCard>> deal544(
+    List<PlayingCard> shuffledDeck,
+    int shufflerSeat,
+  ) {
+    assert(shuffledDeck.length == 52, 'Expected 52 cards');
+    final hands = <int, List<PlayingCard>>{0: [], 1: [], 2: [], 3: []};
+    int cursor = 0;
+    final startSeat = nextSeat(shufflerSeat);
+
+    for (final batchSize in const [5, 4, 4]) {
+      for (int step = 0; step < 4; step++) {
+        final seat = (startSeat + step) % 4;
+        hands[seat]!.addAll(shuffledDeck.sublist(cursor, cursor + batchSize));
+        cursor += batchSize;
+      }
+    }
+    return hands;
   }
 
   /// Sort hand by suit then descending rank
@@ -168,13 +196,26 @@ class GameEngine {
   }
 
   /// Defenders' required hands to defeat the bidder based on bid amount:
-  /// - Bid 10 -> defenders need 4 hands
+  /// - Bid <= 10 -> defenders need 4 hands
   /// - Bid 11 -> defenders need 3 hands
   /// - Bid >= 12 -> defenders need 2 hands
   static int defenderHandsNeededToDefeat(int bid) {
     if (bid <= 10) return 4;
     if (bid == 11) return 3;
     return 2;
+  }
+
+  /// Returns true when opponents have reached the defeat threshold.
+  /// Set [strictFourHands] to true if opponents winning >= 4 hands always ends the round.
+  static bool opponentsDefeatedBidder({
+    required int bid,
+    required int defenderHandsWon,
+    bool strictFourHands = false,
+  }) {
+    if (strictFourHands) {
+      return defenderHandsWon >= 4;
+    }
+    return defenderHandsWon >= defenderHandsNeededToDefeat(bid);
   }
 
   /// Zero-sum round delta calculation for bidding team:
