@@ -31,6 +31,52 @@ List<String> _asStringList(dynamic v) {
   return <String>[];
 }
 
+List<int> _asIntList(dynamic v) {
+  if (v is List) {
+    return v
+        .where((e) => e != null)
+        .map((e) => e is int ? e : int.tryParse(e.toString()))
+        .whereType<int>()
+        .toList();
+  }
+  if (v is Map) {
+    return v.values
+        .map((e) => e is int ? e : int.tryParse(e.toString()))
+        .whereType<int>()
+        .toList();
+  }
+  return <int>[];
+}
+
+List<String> _fisherYatesShuffle(List<String> source) {
+  final deck = List<String>.from(source);
+  final rng = Random.secure();
+  for (int i = deck.length - 1; i > 0; i--) {
+    final j = rng.nextInt(i + 1);
+    final temp = deck[i];
+    deck[i] = deck[j];
+    deck[j] = temp;
+  }
+  return deck;
+}
+
+/// Deals 52 cards (13 per player) across 4 seats in 3 rounds: 5, then 4, then 4.
+Map<int, List<String>> _deal544(List<String> shuffledDeck, int shufflerSeat) {
+  assert(shuffledDeck.length == 52, 'Expected 52 cards, got ${shuffledDeck.length}');
+  final hands = <int, List<String>>{0: [], 1: [], 2: [], 3: []};
+  int cursor = 0;
+  final startSeat = GameEngine.nextSeat(shufflerSeat);
+
+  for (final batchSize in const [5, 4, 4]) {
+    for (int step = 0; step < 4; step++) {
+      final seat = (startSeat + step) % 4;
+      hands[seat]!.addAll(shuffledDeck.sublist(cursor, cursor + batchSize));
+      cursor += batchSize;
+    }
+  }
+  return hands;
+}
+
 /// Converts raw RTDB data into a predictable, fully typed structure.
 Map<String, dynamic> _normalizeRoom(dynamic raw) {
   final room = _asStringMap(raw);
@@ -39,16 +85,28 @@ Map<String, dynamic> _normalizeRoom(dynamic raw) {
   room['seats'] = seatsRaw.map((k, v) {
     final seat = _asStringMap(v);
     seat['hand'] = _asStringList(seat['hand']);
+    seat['isOnline'] = seat['isOnline'] as bool? ?? true;
     return MapEntry(k, seat);
   });
 
   final trick = _asStringMap(room['trickCards']);
   room['trickCards'] = trick.map((k, v) => MapEntry(k, v.toString()));
 
-  room['teamScores'] = _asStringMap(room['teamScores']);
-  room['handsWon'] = _asStringMap(room['handsWon']);
+  final scores = _asStringMap(room['teamScores']);
+  room['teamScores'] = {
+    'team02': (scores['team02'] as num?)?.toInt() ?? 0,
+    'team13': (scores['team13'] as num?)?.toInt() ?? 0,
+  };
+
+  final hands = _asStringMap(room['handsWon']);
+  room['handsWon'] = {
+    'team02': (hands['team02'] as num?)?.toInt() ?? 0,
+    'team13': (hands['team13'] as num?)?.toInt() ?? 0,
+  };
+
   room['pendingChaalCards'] = _asStringList(room['pendingChaalCards']);
   room['remainingDeck'] = _asStringList(room['remainingDeck']);
+  room['khulliPassedSeats'] = _asIntList(room['khulliPassedSeats']);
   return room;
 }
 
@@ -65,8 +123,15 @@ class RoomService {
   }
 
   /// Creates a new room and seats the host at Seat 0.
-  Future<String> createRoom(String playerName) async {
+  Future<String> createRoom(
+    String playerName, {
+    String? playerId,
+  }) async {
     final code = _generateCode();
+    final hostId = (playerId != null && playerId.isNotEmpty)
+        ? playerId
+        : 'player_${Random.secure().nextInt(1 << 31)}';
+
     await _db.child(code).set({
       'status': 'LOBBY',
       'shufflerSeat': 0,
@@ -74,6 +139,7 @@ class RoomService {
       'bidderSeat': -1,
       'currentBid': 9,
       'consecutivePasses': 0,
+      'khulliPassedSeats': <int>[],
       'turapSuit': '',
       'isTurapOpen': false,
       'isKhulliChabbis': false,
@@ -86,14 +152,25 @@ class RoomService {
       'leadSuit': '',
       'statusMessage': 'Waiting for 4 players to join...',
       'seats': {
-        '0': {'name': playerName, 'hand': <String>[]},
+        '0': {
+          'playerId': hostId,
+          'name': playerName,
+          'isOnline': true,
+          'hand': <String>[],
+        },
       },
     });
+
+    await _db.child('$code/seats/0/isOnline').onDisconnect().set(false);
     return code;
   }
 
-  /// Joins an existing room at the first open seat (0..3).
-  Future<int?> joinRoom(String rawCode, String playerName) async {
+  /// Joins an existing room or reclaims an existing seat if [playerId] matches.
+  Future<int?> joinRoom(
+    String rawCode,
+    String playerName, {
+    String? playerId,
+  }) async {
     final code = rawCode.trim().toUpperCase();
     final snap = await _db.child(code).get();
     if (!snap.exists || snap.value == null) return null;
@@ -101,13 +178,38 @@ class RoomService {
     final data = _normalizeRoom(snap.value);
     final seats = data['seats'] as Map<String, dynamic>;
 
+    // 1. Reclaim existing seat for accidental back press / reconnect
+    if (playerId != null && playerId.isNotEmpty) {
+      for (int i = 0; i < 4; i++) {
+        final seatMap = seats['$i'] as Map<String, dynamic>?;
+        if (seatMap != null && seatMap['playerId'] == playerId) {
+          await _db.child('$code/seats/$i').update({
+            'name': playerName,
+            'isOnline': true,
+          });
+          await _db.child('$code/seats/$i/isOnline').onDisconnect().set(false);
+          return i;
+        }
+      }
+    }
+
+    // 2. Otherwise sit in the first unoccupied seat (0..3)
     for (int i = 0; i < 4; i++) {
       if (!seats.containsKey('$i')) {
+        final assignedId = (playerId != null && playerId.isNotEmpty)
+            ? playerId
+            : 'seat_${i}_${Random.secure().nextInt(1 << 24)}';
+
         await _db.child('$code/seats/$i').set({
+          'playerId': assignedId,
           'name': playerName,
+          'isOnline': true,
           'hand': <String>[],
         });
-        if (seats.length + 1 == 4) {
+        await _db.child('$code/seats/$i/isOnline').onDisconnect().set(false);
+
+        final updatedCount = seats.length + 1;
+        if (updatedCount == 4) {
           await _db.child(code).update({
             'statusMessage': 'All 4 players joined! Shuffler can deal.',
           });
@@ -115,19 +217,27 @@ class RoomService {
         return i;
       }
     }
+
     return null;
   }
 
-  Stream<Map<String, dynamic>?> watchRoom(String code) {
+  /// Explicit leave button helper if a player intentionally exits.
+  Future<void> leaveSeat(String code, int seat) async {
+    await _db.child('$code/seats/$seat/isOnline').set(false);
+  }
+
+  Stream?> watchRoom(String code) {
     return _db.child(code).onValue.map((event) {
       if (!event.snapshot.exists || event.snapshot.value == null) return null;
       return _normalizeRoom(event.snapshot.value);
     });
   }
 
-  /// Step 1: Shuffler deals 5 cards to each player; first anti-clockwise player starts bidding.
+  /// Step 1: Fisher-Yates shuffle + 5-4-4 deal (all 52 cards -> 13 each).
   Future<void> dealInitialFive(String code, int shufflerSeat) async {
-    final deck = GameEngine.createShuffledDeck().map((c) => c.code).toList();
+    final rawDeck = GameEngine.createShuffledDeck().map((c) => c.code).toList();
+    final deck = _fisherYatesShuffle(rawDeck);
+    final hands13 = _deal544(deck, shufflerSeat);
     final firstBidder = GameEngine.nextSeat(shufflerSeat);
 
     final updates = <String, dynamic>{
@@ -137,6 +247,7 @@ class RoomService {
       'bidderSeat': -1,
       'currentBid': 9,
       'consecutivePasses': 0,
+      'khulliPassedSeats': <int>[],
       'turapSuit': '',
       'isTurapOpen': false,
       'isKhulliChabbis': false,
@@ -146,12 +257,15 @@ class RoomService {
       'pendingChaalCards': <String>[],
       'trickCards': <String, String>{},
       'leadSuit': '',
-      'remainingDeck': deck.sublist(20),
-      'statusMessage': '5 cards dealt! Seat ${firstBidder + 1} picks Turap & bids.',
+      'remainingDeck': <String>[],
+      'statusMessage':
+          '52 cards dealt (5-4-4, 13 each)! Seat ${firstBidder + 1} picks Turap & bids.',
     };
 
     for (int i = 0; i < 4; i++) {
-      updates['seats/$i/hand'] = deck.sublist(i * 5, (i + 1) * 5);
+      // Initial 5-card reveal for bidding while keeping full 13-card deal intact
+      updates['seats/$i/hand'] = hands13[i]!.sublist(0, 5);
+      updates['seats/$i/fullHand'] = hands13[i]!;
     }
     await _db.child(code).update(updates);
   }
@@ -175,7 +289,7 @@ class RoomService {
     });
   }
 
-  /// Pass during bidding; if 3 passes occur after a bid, deal remaining 4 + 4 cards.
+  /// Pass during bidding; if 3 passes occur after a bid, reveal all 13 dealt cards.
   Future<void> passBid({
     required String code,
     required Map<String, dynamic> room,
@@ -185,7 +299,7 @@ class RoomService {
     final passes = (room['consecutivePasses'] as int) + 1;
 
     if (bidderSeat != -1 && passes >= 3) {
-      await _dealRemainingCards(code, room, bidderSeat);
+      await _revealFullHandsForKhulliWindow(code, room, bidderSeat);
     } else {
       final next = GameEngine.nextSeat(seat);
       await _db.child(code).update({
@@ -196,34 +310,33 @@ class RoomService {
     }
   }
 
-  /// Deals remaining 32 cards in 2 waves of 4 cards (total 13 cards per player).
-  Future<void> _dealRemainingCards(
+  /// Unlocks all 13 cards dealt via 5-4-4 for the Khulli Chabbis / trick phase.
+  Future<void> _revealFullHandsForKhulliWindow(
     String code,
     Map<String, dynamic> room,
     int bidderSeat,
   ) async {
-    final rem = List<String>.from(room['remainingDeck'] as List);
     final seats = room['seats'] as Map<String, dynamic>;
     final updates = <String, dynamic>{
       'status': 'KHULLI_WINDOW',
       'turnSeat': bidderSeat,
+      'khulliPassedSeats': <int>[],
       'remainingDeck': <String>[],
       'statusMessage':
-          'All 13 cards dealt (4 + 4)! Bidder may lead or anyone may call Khulli Chabbis.',
+          'All 13 cards ready! Call Khulli Chabbis, Pass, or lead to start.',
     };
 
     for (int i = 0; i < 4; i++) {
       final seatData = seats['$i'] as Map<String, dynamic>;
-      final existing = List<String>.from(seatData['hand'] as List);
-      final wave1 = rem.sublist(i * 4, (i + 1) * 4);
-      final wave2 = rem.sublist(16 + i * 4, 16 + (i + 1) * 4);
-      updates['seats/$i/hand'] = [...existing, ...wave1, ...wave2];
+      final full = _asStringList(seatData['fullHand']);
+      final current = _asStringList(seatData['hand']);
+      updates['seats/$i/hand'] = full.isNotEmpty ? full : current;
     }
 
     await _db.child(code).update(updates);
   }
 
-  /// Declares Open 26 (Khulli Chabbis) after all 13 cards are distributed.
+  /// Declares Open 26 (Khulli Chabbis).
   Future<void> callKhulliChabbis({
     required String code,
     required int callerSeat,
@@ -236,9 +349,28 @@ class RoomService {
       'turapSuit': turapSuit.name,
       'isTurapOpen': true,
       'isKhulliChabbis': true,
+      'khulliPassedSeats': <int>[],
       'turnSeat': callerSeat,
       'statusMessage':
           'KHULLI CHABBIS called by Seat ${callerSeat + 1}! Turap is ${turapSuit.label}.',
+    });
+  }
+
+  /// Passes on calling Khulli Chabbis and advances turn to the next seat.
+  Future<void> passKhulliChabbis({
+    required String code,
+    required Map<String, dynamic> room,
+    required int seat,
+  }) async {
+    final passed = Set<int>.from(_asIntList(room['khulliPassedSeats']))..add(seat);
+    final nextSeat = GameEngine.nextSeat(seat);
+    final bidderSeat = room['bidderSeat'] as int;
+
+    await _db.child(code).update({
+      'khulliPassedSeats': passed.toList(),
+      'turnSeat': passed.length >= 4 && bidderSeat != -1 ? bidderSeat : nextSeat,
+      'statusMessage':
+          'Seat ${seat + 1} passed Khulli Chabbis. Seat ${nextSeat + 1}\'s turn.',
     });
   }
 
@@ -312,12 +444,13 @@ class RoomService {
     final pendingChaal = List<String>.from(room['pendingChaalCards'] as List);
     pendingChaal.addAll(trickRaw.values.cast<String>());
 
-    int newStreakSeat = trickWinner;
+    final int newStreakSeat = trickWinner;
     int newStreakCount = (prevStreakSeat == trickWinner) ? prevStreakCount + 1 : 1;
     String chaalMsg =
         'Seat ${trickWinner + 1} won hand ($newStreakCount/2 consecutive).';
 
-    if (newStreakCount == 2) {
+    final chaalWonNow = newStreakCount == 2;
+    if (chaalWonNow) {
       chaalMsg =
           'CHAAL WON! Seat ${trickWinner + 1} won 2 consecutive hands (${pendingChaal.length} cards claimed)!';
       pendingChaal.clear();
@@ -331,12 +464,13 @@ class RoomService {
     final defenderTeam = bidderTeam == 'team02' ? 'team13' : 'team02';
     final isKhulli = room['isKhulliChabbis'] as bool? ?? false;
 
-    final khulliDefeatedEarly = isKhulli &&
-        (winnerTeam == defenderTeam) &&
-        (prevStreakSeat == trickWinner) &&
-        (prevStreakCount + 1 == 2);
+    final khulliDefeatedEarly =
+        isKhulli && (winnerTeam == defenderTeam) && chaalWonNow;
 
-    if (totalHandsPlayed >= 13 || khulliDefeatedEarly) {
+    // End round if 13 hands played, Khulli defeated early, or opponents win >= 4 hands
+    final opponentsWonFourOrMore = (handsWon[defenderTeam] as int) >= 4;
+
+    if (totalHandsPlayed >= 13 || khulliDefeatedEarly || opponentsWonFourOrMore) {
       await _finishRound(
         code: code,
         room: room,
@@ -344,6 +478,7 @@ class RoomService {
         updatedHand: hand,
         handsWon: handsWon,
         khulliDefeatedEarly: khulliDefeatedEarly,
+        opponentsWonFourOrMore: opponentsWonFourOrMore,
       );
       return;
     }
@@ -362,6 +497,25 @@ class RoomService {
     });
   }
 
+  /// Keeps shuffler locked to a team while its score is negative (< 0).
+  int _resolveNextShuffler({
+    required int currentShuffler,
+    required Map<String, dynamic> scores,
+    required bool bidderWonRound,
+  }) {
+    final t02 = (scores['team02'] as int?) ?? 0;
+    final t13 = (scores['team13'] as int?) ?? 0;
+
+    if (t02 < 0 && t13 >= 0) {
+      return (currentShuffler == 0 || currentShuffler == 2) ? currentShuffler : 0;
+    }
+    if (t13 < 0 && t02 >= 0) {
+      return (currentShuffler == 1 || currentShuffler == 3) ? currentShuffler : 1;
+    }
+
+    return bidderWonRound ? currentShuffler : GameEngine.nextSeat(currentShuffler);
+  }
+
   Future<void> _finishRound({
     required String code,
     required Map<String, dynamic> room,
@@ -369,6 +523,7 @@ class RoomService {
     required List<String> updatedHand,
     required Map<String, dynamic> handsWon,
     required bool khulliDefeatedEarly,
+    required bool opponentsWonFourOrMore,
   }) async {
     final bidderSeat = room['bidderSeat'] as int;
     final bidderTeam = GameEngine.teamKeyForSeat(bidderSeat);
@@ -391,10 +546,13 @@ class RoomService {
     scores[bidderTeam] = (scores[bidderTeam] as int) + delta;
     scores[defenderTeam] = (scores[defenderTeam] as int) - delta;
 
-    final bidderWonRound = delta > 0;
+    final bidderWonRound = delta > 0 && !opponentsWonFourOrMore;
     final currentShuffler = room['shufflerSeat'] as int;
-    final nextShuffler =
-        bidderWonRound ? currentShuffler : GameEngine.nextSeat(currentShuffler);
+    final nextShuffler = _resolveNextShuffler(
+      currentShuffler: currentShuffler,
+      scores: scores,
+      bidderWonRound: bidderWonRound,
+    );
 
     final t02 = scores['team02'] as int;
     final t13 = scores['team13'] as int;
@@ -404,6 +562,9 @@ class RoomService {
     if (matchOver) {
       final loser = t02 <= -104 ? 'Team A (Seats 1 & 3)' : 'Team B (Seats 2 & 4)';
       endMsg = 'MATCH OVER! $loser reached -104 points and lost!';
+    } else if (opponentsWonFourOrMore) {
+      endMsg =
+          'Round ended: Opponents won $defenderHands hands (>= 4)! Next shuffler: Seat ${nextShuffler + 1}.';
     } else {
       endMsg =
           'Round ended (${delta >= 0 ? '+$delta' : '$delta'} to bidder). Next shuffler: Seat ${nextShuffler + 1}.';
