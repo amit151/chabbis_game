@@ -68,13 +68,13 @@ class GameEngine {
   /// Anti-clockwise next seat: 0 -> 1 -> 2 -> 3 -> 0
   static int nextSeat(int seat) => (seat + 1) % 4;
 
-  /// Opposite seat is teammate: (0 & 2) = Team A (team02), (1 & 3) = Team B (team13)
+  /// Opposite seat is teammate: (0 & 2) = team02, (1 & 3) = team13
   static int teammateSeat(int seat) => (seat + 2) % 4;
 
   static String teamKeyForSeat(int seat) =>
       (seat % 2 == 0) ? 'team02' : 'team13';
 
-  /// Explicit Fisher-Yates shuffle on a standard 52-card deck.
+  /// Fisher-Yates in-place shuffle on a standard 52-card deck.
   static List<PlayingCard> createShuffledDeck([Random? rng]) {
     final random = rng ?? Random.secure();
     final deck = <PlayingCard>[];
@@ -99,7 +99,7 @@ class GameEngine {
     List<PlayingCard> shuffledDeck,
     int shufflerSeat,
   ) {
-    assert(shuffledDeck.length == 52, 'Expected 52 cards');
+    assert(shuffledDeck.length == 52, 'Expected 52 cards, got ${shuffledDeck.length}');
     final hands = <int, List<PlayingCard>>{0: [], 1: [], 2: [], 3: []};
     int cursor = 0;
     final startSeat = nextSeat(shufflerSeat);
@@ -205,17 +205,28 @@ class GameEngine {
     return 2;
   }
 
-  /// Returns true when opponents have reached the defeat threshold.
-  /// Set [strictFourHands] to true if opponents winning >= 4 hands always ends the round.
-  static bool opponentsDefeatedBidder({
+  /// Number of hands won by the opposing (defender) team that ends the round/game:
+  /// - Khulli Chabbis -> 2 hands
+  /// - Bid <= 10 -> 4 hands
+  /// - Bid == 11 -> 3 hands
+  /// - Bid >= 12 -> 2 hands
+  static int opponentHandsThreshold({
+    required int bid,
+    required bool isKhulliChabbis,
+  }) {
+    if (isKhulliChabbis) return 2;
+    if (bid <= 10) return 4;
+    if (bid == 11) return 3;
+    return 2;
+  }
+
+  static bool opponentsReachedEndThreshold({
     required int bid,
     required int defenderHandsWon,
-    bool strictFourHands = false,
+    required bool isKhulliChabbis,
   }) {
-    if (strictFourHands) {
-      return defenderHandsWon >= 4;
-    }
-    return defenderHandsWon >= defenderHandsNeededToDefeat(bid);
+    return defenderHandsWon >=
+        opponentHandsThreshold(bid: bid, isKhulliChabbis: isKhulliChabbis);
   }
 
   /// Zero-sum round delta calculation for bidding team:
@@ -227,8 +238,13 @@ class GameEngine {
     required bool isKhulliChabbis,
     required bool khulliChabbisFailedEarly,
   }) {
+    final neededToDefeat = opponentHandsThreshold(
+      bid: bid,
+      isKhulliChabbis: isKhulliChabbis,
+    );
+
     if (isKhulliChabbis) {
-      if (khulliChabbisFailedEarly || defenderHandsWon > 0) {
+      if (khulliChabbisFailedEarly || defenderHandsWon >= neededToDefeat) {
         return -52;
       }
       return 52;
@@ -239,7 +255,6 @@ class GameEngine {
       return 26;
     }
 
-    final neededToDefeat = defenderHandsNeededToDefeat(bid);
     if (defenderHandsWon >= neededToDefeat) {
       return -2 * bid;
     }
