@@ -234,10 +234,11 @@ class _GameTableScreenState extends State<GameTableScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder?>(
+    return StreamBuilder(
       stream: _roomService.watchRoom(widget.roomCode),
       builder: (context, snapshot) {
-        final room = snapshot.data;
+        final rawData = snapshot.data;
+        final room = rawData is Map ? Map<String, dynamic>.from(rawData) : null;
         if (room == null) {
           return Scaffold(
             backgroundColor: const Color(0xFF0E331D),
