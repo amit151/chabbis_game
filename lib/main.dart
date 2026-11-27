@@ -1,15 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_database/firebase_database.dart';
 import 'game_engine.dart';
 import 'room_service.dart';
-
-const String kDatabaseUrl = 'https://chabbis-26-default-rtdb.firebaseio.com';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  FirebaseDatabase.instance.databaseURL = kDatabaseUrl;
   runApp(const Chabbis26App());
 }
 
@@ -234,11 +230,10 @@ class _GameTableScreenState extends State<GameTableScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder(
+    return StreamBuilder<Map<String, dynamic>?>(
       stream: _roomService.watchRoom(widget.roomCode),
       builder: (context, snapshot) {
-        final rawData = snapshot.data;
-        final room = rawData is Map ? Map<String, dynamic>.from(rawData) : null;
+        final room = snapshot.data;
         if (room == null) {
           return Scaffold(
             backgroundColor: const Color(0xFF0E331D),
@@ -261,17 +256,19 @@ class _GameTableScreenState extends State<GameTableScreen> {
             ? null
             : Suit.values.firstWhere((s) => s.name == turapStr);
 
-        final scores = Map<String, dynamic>.from(room['teamScores']);
-        final handsWon = Map<String, dynamic>.from(room['handsWon']);
-        final seats = Map<String, dynamic>.from(room['seats'] ?? {});
-        final myData = Map<String, dynamic>.from(seats['${widget.mySeat}'] ?? {});
+        final scores = Map<String, dynamic>.from(room['teamScores'] as Map);
+        final handsWon = Map<String, dynamic>.from(room['handsWon'] as Map);
+        final seats = Map<String, dynamic>.from((room['seats'] ?? {}) as Map);
+        final myData =
+            Map<String, dynamic>.from((seats['${widget.mySeat}'] ?? {}) as Map);
         final myHand = GameEngine.sortHand(
-          List<String>.from(myData['hand'] ?? [])
+          List<String>.from((myData['hand'] ?? []) as List)
               .map(PlayingCard.fromCode)
               .toList(),
         );
 
-        final trickRaw = Map<String, dynamic>.from(room['trickCards'] ?? {});
+        final trickRaw =
+            Map<String, dynamic>.from((room['trickCards'] ?? {}) as Map);
         final leadSuitStr = room['leadSuit'] as String? ?? '';
         final leadSuit = leadSuitStr.isEmpty
             ? null
@@ -424,7 +421,7 @@ class _GameTableScreenState extends State<GameTableScreen> {
     int shufflerSeat,
     String role,
   ) {
-    final info = seats['$seat'];
+    final info = seats['$seat'] as Map?;
     final name = info == null ? 'Open' : (info['name'] ?? 'P${seat + 1}');
     final active = seat == turnSeat;
     return Container(
